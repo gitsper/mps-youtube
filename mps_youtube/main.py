@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 
+
 __version__ = "0.2.6-dev"
 __notes__ = "development version"
 __author__ = "np1"
@@ -57,7 +58,7 @@ from urllib.parse import urlencode
 
 import pafy
 
-from . import terminalsize, g, c, commands, cache, streams, screen
+from . import g, c, commands, cache, streams, screen
 from .playlist import Playlist, Video
 from .paths import get_config_dir
 from .config import Config, known_player_set, import_config
@@ -251,6 +252,13 @@ def init():
     else:
         g.muxapp = has_exefile("ffmpeg") or has_exefile("avconv")
 
+    # find the tagging app for metadata
+    if mswin:
+        # ¯\_(ツ)_/¯ I'm on a mac...
+        pass
+    else:
+        g.tagapp = has_exefile("mid3v2")
+
     # initialize remote interface
     try:
         from . import mpris
@@ -290,7 +298,7 @@ DELETE_ORIGINAL: True
 # Encode ogg or m4a to mp3 256k
 name: MP3 256k
 extension: mp3
-valid for: ogg,m4a
+valid for: ogg,m4a,webm
 command: ENCODER_PATH -i IN -codec:a libmp3lame -b:a 256k OUT.EXT
 
 # Encode ogg or m4a to mp3 192k
@@ -320,7 +328,7 @@ command: ENCODER_PATH -i IN -codec:a libvorbis -b:a 256k OUT.EXT
 # Encode ogg to m4a
 name: M4A 256k
 extension: m4a
-valid for: ogg
+valid for: ogg,webm
 command: ENCODER_PATH -i IN -strict experimental -codec:a aac -b:a 256k OUT.EXT
 
 # Encode ogg or m4a to wma v2
@@ -437,7 +445,7 @@ def setconfig(key, val):
         # Config.save() will be called by Config.set() method
         message = Config[key.upper()].set(val)
 
-    showconfig(1)
+    showconfig()
     g.message = message
 
 
@@ -631,7 +639,7 @@ def get_track_id_from_json(item):
     for field in fields:
         node = item
         for p in field.split('/'):
-            if node and type(node) is dict:
+            if node and isinstance(node, dict):
                 node = node.get(p)
         if node:
             return node
@@ -639,6 +647,7 @@ def get_track_id_from_json(item):
 
 
 class GdataError(Exception):
+
     """Gdata query failed."""
     pass
 
@@ -683,7 +692,7 @@ def get_page_info_from_json(jsons, result_count=None):
     pageinfo = jsons.get('pageInfo')
     per_page = pageinfo.get('resultsPerPage')
     g.result_count = pageinfo.get('totalResults')
-    if result_count: # limit number of results, e.g. if api makes it up
+    if result_count:  # limit number of results, e.g. if api makes it up
         if result_count < per_page:
             g.result_count = min(g.result_count, result_count)
 
@@ -697,7 +706,7 @@ def get_tracks_from_json(jsons):
         return False
 
     # fetch detailed information about items from videos API
-    qs = {'part':'contentDetails,statistics,snippet',
+    qs = {'part': 'contentDetails,statistics,snippet',
           'id': ','.join([get_track_id_from_json(i) for i in items])}
 
     wdata = call_gdata('videos', qs)
@@ -735,7 +744,7 @@ def get_tracks_from_json(jsons):
             cursong = Video(ytid=ytid, title=title, length=duration)
             likes = int(stats.get('likeCount', 0))
             dislikes = int(stats.get('dislikeCount', 0))
-            #XXX this is a very poor attempt to calculate a rating value
+            # XXX this is a very poor attempt to calculate a rating value
             rating = 5.*likes/(likes+dislikes) if (likes+dislikes) > 0 else 0
             category = snippet.get('categoryId')
 
@@ -743,15 +752,15 @@ def get_tracks_from_json(jsons):
             g.meta[ytid] = dict(
                 # tries to get localized title first, fallback to normal title
                 title=snippet.get('localized',
-                                  {'title':snippet.get('title',
-                                                       '[!!!]')}).get('title',
-                                                                      '[!]'),
+                                  {'title': snippet.get('title',
+                                                        '[!!!]')}).get('title',
+                                                                       '[!]'),
                 length=str(fmt_time(cursong.length)),
                 rating=str('{}'.format(rating))[:4].ljust(4, "0"),
                 uploader=snippet.get('channelId'),
                 uploaderName=snippet.get('channelTitle'),
                 category=category,
-                aspect="custom", #XXX
+                aspect="custom",  # XXX
                 uploaded=yt_datetime(snippet.get('publishedAt', ''))[1],
                 likes=str(num_repr(likes)),
                 dislikes=str(num_repr(dislikes)),
@@ -840,7 +849,7 @@ def real_len(u, alt=False):
     if not isinstance(u, str):
         u = u.decode("utf8")
 
-    u = xenc(u) # Handle replacements of unsuported characters
+    u = xenc(u)  # Handle replacements of unsuported characters
 
     ueaw = unicodedata.east_asian_width
 
@@ -917,7 +926,13 @@ def generate_playlist_display():
         author = x.get('author') or "unknown"
         updated = yt_datetime(x.get('updated'))[1]
         title = uea_pad(cw - 36, title)
-        out += (fmtrow % (col, str(n + 1), title, author[:12], updated, str(length), c.w))
+        out += (fmtrow % (col,
+                          str(n + 1),
+                          title,
+                          author[:12],
+                          updated,
+                          str(length),
+                          c.w))
 
     return out + "\n" * (5 - len(g.ytpls))
 
@@ -968,7 +983,7 @@ def page_msg(page=0):
                               "%s%s%s" % (c.y, page+1, c.w),
                               page_count,
                               '>' if (g.more_pages is not None or
-                                       (page < page_count)) else ']')
+                                      (page < page_count)) else ']')
     return None
 
 
@@ -1067,9 +1082,11 @@ def generate_real_playerargs(song, override, failcount):
     if "uiressl=yes" in stream['url'] and "mplayer" in Config.PLAYER.get:
         ver = g.mplayer_version
         # Mplayer too old to support https
-        if not (ver > (1,1) if isinstance(ver, tuple) else ver >= 37294):
-            raise IOError("%s : Sorry mplayer doesn't support this stream. "
-                          "Use mpv or update mplayer to a newer version" % song.title)
+        if not (ver > (1, 1) if isinstance(ver, tuple) else ver >= 37294):
+            raise IOError(
+                "%s : Sorry mplayer doesn't support this stream. "
+                "Use mpv or update mplayer to a newer version" %
+                song.title)
 
     size = get_size(song.ytid, stream['url'])
     songdata = (song.ytid, stream['ext'] + " " + stream['quality'],
@@ -1530,7 +1547,6 @@ def _search(progtext, qs=None, splash=True, pre_load=True):
     return False
 
 
-
 def token(page):
     """ Returns a page token for a given start index. """
     index = (page or 0) * screen.getxy().max_results
@@ -1544,7 +1560,11 @@ def token(page):
     return b64.strip('=')
 
 
-def generate_search_qs(term, page=0, result_count=screen.getxy().max_results, match='term'):
+def generate_search_qs(
+        term,
+        page=0,
+        result_count=screen.getxy().max_results,
+        match='term'):
     """ Return query string. """
     if not result_count:
         result_count = screen.getxy().max_results
@@ -1618,7 +1638,10 @@ def channelfromname(user):
 
         except GdataError as e:
             g.message = "Could not retrieve information for user {}\n{}".format(
-                c.y + user + c.w, e)
+                c.y +
+                user +
+                c.w,
+                e)
             dbg('Error during channel request for user {}:\n{}'.format(
                 user, e))
             return
@@ -1634,7 +1657,7 @@ def usersearch(q_user, page=0, splash=True, identify='forUsername'):
     user, _, term = (x.strip() for x in q_user.partition("/"))
     if identify == 'forUsername':
         ret = channelfromname(user)
-        if not ret: # Error
+        if not ret:  # Error
             return
         user, channel_id = ret
 
@@ -1652,10 +1675,11 @@ def usersearch_id(q_user, page=0, splash=True):
 
     user, channel_id, term = (x.strip() for x in q_user.split("/"))
     query = generate_search_qs(term, page=page)
-    aliases = dict(views='viewCount')  # The value of the config item is 'views' not 'viewCount'
+    # The value of the config item is 'views' not 'viewCount'
+    aliases = dict(views='viewCount')
     if Config.USER_ORDER.get:
         query['order'] = aliases.get(Config.USER_ORDER.get,
-                Config.USER_ORDER.get)
+                                     Config.USER_ORDER.get)
     query['channelId'] = channel_id
 
     termuser = tuple([c.y + x + c.w for x in (term, user)])
@@ -1670,7 +1694,7 @@ def usersearch_id(q_user, page=0, splash=True):
             failmsg = """User %s not found or has no videos in the Music category.
 Use 'set search_music False' to show results not in the Music category.""" % termuser[1]
         else:
-            failmsg = "User %s not found or has no videos."  % termuser[1]
+            failmsg = "User %s not found or has no videos." % termuser[1]
     msg = str(msg).format(c.w, c.y, c.y, term, user)
 
     have_results = _search(progtext, query, splash)
@@ -1775,7 +1799,7 @@ def pl_search(term, page=0, splash=True, is_user=False):
 
     if is_user:
         ret = channelfromname(term)
-        if not ret: # Error
+        if not ret:  # Error
             return
         user, channel_id = ret
 
@@ -1787,11 +1811,11 @@ def pl_search(term, page=0, splash=True, is_user=False):
         qs = generate_search_qs(term, page, result_count=max_results)
         qs['type'] = 'playlist'
         if 'videoCategoryId' in qs:
-            del qs['videoCategoryId'] # Incompatable with type=playlist
+            del qs['videoCategoryId']  # Incompatable with type=playlist
 
         pldata = call_gdata('search', qs)
         id_list = [i.get('id', {}).get('playlistId')
-                    for i in pldata.get('items', ())]
+                   for i in pldata.get('items', ())]
         # page info
         get_page_info_from_json(pldata, len(id_list))
 
@@ -1841,7 +1865,7 @@ def get_pl_from_json(pldata):
             title=snippet["title"],
             author=snippet["channelTitle"],
             created=snippet["publishedAt"],
-            updated=snippet['publishedAt'], #XXX Not available in API?
+            updated=snippet['publishedAt'],  # XXX Not available in API?
             description=snippet["description"]))
 
     return results
@@ -1921,7 +1945,13 @@ def fetch_comments(item):
     coms = [x.get('snippet', {}) for x in coms]
     coms = [x.get('topLevelComment', {}) for x in coms]
     # skip blanks
-    coms = [x for x in coms if len(x.get('snippet', {}).get('textDisplay', '').strip())]
+    coms = [
+        x for x in coms if len(
+            x.get(
+                'snippet',
+                {}).get(
+                'textDisplay',
+                '').strip())]
     if not len(coms):
         g.message = "No comments for %s" % item.title[:50]
         g.content = generate_songlist_display()
@@ -2009,7 +2039,7 @@ def _make_fname(song, ext=None, av=None, subdir=None):
 
     else:
         stream = streams.select(streams.get(song),
-                audio=av == "audio", m4a_ok=True)
+                                audio=av == "audio", m4a_ok=True)
         extension = stream['ext']
 
     # filename = song.title[:59] + "." + extension
@@ -2036,33 +2066,29 @@ def extract_metadata(name):
     return dict(artist=artist, title=title)
 
 
-def remux_audio(filename, title):
+def insert_metadata(filename, title, mb_data=None):
     """ Remux audio file. Insert limited metadata tags. """
-    dbg("starting remux")
-    temp_file = filename + "." + str(random.randint(10000, 99999))
-    os.rename(filename, temp_file)
+    dbg("inserting metadata")
     meta = extract_metadata(title)
-    metadata = ["title=%s" % meta["title"]]
-
+    metadata = ["--song=%s" % meta["title"]]
     if meta["artist"]:
-        metadata = ["title=%s" % meta["title"], "-metadata",
-                    "artist=%s" % meta["artist"]]
+        metadata = ["--song=%s" % meta["title"],
+                    "--artist=%s" % meta["artist"]]
 
-    cmd = [g.muxapp, "-y", "-i", temp_file, "-acodec", "copy", "-metadata"]
-    cmd += metadata + ["-vn", filename]
+    if mb_data:
+        metadata = ["--song=%s" % mb_data["title"],
+                    "--album=%s" % mb_data["album"],
+                    "--artist=%s" % mb_data["artist"],
+                    "--track=%d" % mb_data["track"]]
+    cmd = [g.tagapp] + metadata + [filename]
     dbg(cmd)
-
     try:
         with open(os.devnull, "w") as devnull:
             subprocess.call(cmd, stdout=devnull, stderr=subprocess.STDOUT)
-
     except OSError:
-        dbg("Failed to remux audio using %s", g.muxapp)
-        os.rename(temp_file, filename)
-
+        dbg("Failed to tag metadata using %s", g.tagapp)
     else:
-        os.unlink(temp_file)
-        dbg("remuxed audio file using %s" % g.muxapp)
+        dbg("Successfully tagged metadata using %s", g.tagapp)
 
 
 def transcode(filename, enc_data):
@@ -2093,9 +2119,18 @@ def transcode(filename, enc_data):
         elif d == "OUT.EXT":
             newcom[n] = outfn = base + "." + enc_data['ext']
 
-    returncode = subprocess.call(newcom)
+    xprint("Transcoding %s%s%s .." % (c.r, filename, c.w))
 
-    if returncode == 0 and g.delete_orig:
+    p = subprocess.Popen(newcom, stderr=subprocess.PIPE)
+
+    while True:
+        chatter = p.stderr.read(128)
+        if not chatter:
+            break
+        # put a status bar here?
+    p.wait()
+
+    if g.delete_orig:
         os.unlink(filename)
 
     return outfn
@@ -2177,11 +2212,19 @@ def _download(song, filename, url=None, audio=False, allow_transcode=True):
     ext = filename.split(".")[-1]
     valid_ext = ext in active_encoder['valid'].split(",")
 
-    if audio and g.muxapp:
-        remux_audio(filename, song.title)
-
     if Config.ENCODER.get != 0 and valid_ext and allow_transcode:
         filename = transcode(filename, active_encoder)
+
+    if audio and g.tagapp:
+        if g.last_album and g.using_last_album:
+            insert_metadata(filename, song.title, mb_data = {
+                "title": song.title,
+                "track": [_["title"] for _ in g.last_album["mb_tracks"]].index(song.title)+1,
+                "album": g.last_album["title"],
+                "artist": g.last_album["artist"],
+            })
+        else:
+            insert_metadata(filename, song.title)
 
     return filename
 
@@ -2379,6 +2422,22 @@ def down_many(dltype, choice, subdir=None):
     av = "audio" if dltype.startswith("da") else "video"
     msg = ""
 
+    g.using_last_album = False
+    if g.last_album:
+        show_message("Use last MusicBrainz search to organize files? [yes]", c.g, update=True)
+        g.using_last_album = input("> ")
+        if g.using_last_album == "" or g.using_last_album == "yes":
+            g.using_last_album = True
+        else:
+            g.using_last_album = False
+    if g.using_last_album:
+        subdir = g.last_album['title']
+        if len(g.last_album['mb_tracks']) != len(downsongs):
+            show_message("Error using last MusicBrainz search: track mismatch", c.g, update=True)
+            input("Download aborted [Enter]")
+            g.model.songs = temp
+            downsongs = []
+
     def handle_error(message):
         """ Handle error in download. """
         g.message = message
@@ -2388,7 +2447,7 @@ def down_many(dltype, choice, subdir=None):
         g.model.songs.pop(0)
 
     try:
-        for song in downsongs:
+        for n, song in enumerate(downsongs, 0):
             g.result_count = len(g.model.songs)
             disp = generate_songlist_display()
             title = "Download Queue (%s):%s\n\n" % (av, c.w)
@@ -2397,6 +2456,8 @@ def down_many(dltype, choice, subdir=None):
             screen.update()
 
             try:
+                if g.using_last_album:
+                    song.title = g.last_album["mb_tracks"][n]["title"]
                 filename = _make_fname(song, None, av=av, subdir=subdir)
 
             except IOError as e:
@@ -2410,7 +2471,7 @@ def down_many(dltype, choice, subdir=None):
                 continue
 
             try:
-                _download(song, filename, url=None, audio=av == "audio")
+                filename = _download(song, filename, url=None, audio=av == "audio")
 
             except HTTPError:
                 handle_error("HTTP Error for %s" % song.title)
@@ -2429,6 +2490,7 @@ def down_many(dltype, choice, subdir=None):
         g.message = msg
         g.result_count = len(g.model.songs)
         g.content = generate_songlist_display()
+        g.using_last_album = False
 
 
 @commands.command(r'(da|dv)pl\s+%s' % commands.pl)
@@ -2455,7 +2517,7 @@ def down_user_pls(dltype, user):
 
 
 @commands.command(r'(%s{0,3})([-,\d\s]{1,250})\s*(%s{0,3})' %
-        (commands.rs, commands.rs))
+                  (commands.rs, commands.rs))
 def play(pre, choice, post=""):
     """ Play choice.  Use repeat/random if appears in pre/post. """
     # pylint: disable=R0914
@@ -2512,7 +2574,7 @@ def play(pre, choice, post=""):
 
 
 @commands.command(r'(%s{0,3})(?:\*|all)\s*(%s{0,3})' %
-        (commands.rs, commands.rs))
+                  (commands.rs, commands.rs))
 def play_all(pre, choice, post=""):
     """ Play all tracks in model (last displayed). shuffle/repeat if req'd."""
     options = pre + choice + post
@@ -2565,7 +2627,7 @@ def preload(song, delay=2, override=False):
         if not stream and not video:
             # preload video stream, no audio available
             stream = streams.select(streams.get(song),
-                    g.streams[ytid], audio=False)
+                                    g.streams[ytid], audio=False)
 
         get_size(ytid, stream['url'], preloading=True)
 
@@ -3058,7 +3120,7 @@ def nextprev(np, page=None):
     elif np == "p":
 
         if g.last_search_query:
-            if page and int(page) in range(1,20):
+            if page and int(page) in range(1, 20):
                 g.current_page = int(page)-1
                 good = True
 
@@ -3294,14 +3356,13 @@ def yt_url(url, print_title=0):
 
         except (IOError, ValueError) as e:
             g.message = c.r + str(e) + c.w
-            g.content = g.content or generate_songlist_display(zeromsg=g.message)
+            g.content = g.content or generate_songlist_display(
+                zeromsg=g.message)
             return
 
         g.browse_mode = "normal"
         v = Video(p.videoid, p.title, p.length)
         g.model.songs += [v]
-
-    
 
     if not g.command_line:
         g.content = generate_songlist_display()
@@ -3314,17 +3375,18 @@ def yt_url(url, print_title=0):
 def yt_url_file(file_name):
     """ Access a list of urls in a text file """
 
-    #Open and read the file
+    # Open and read the file
     try:
         with open(file_name, "r") as fo:
             output = ' '.join([line.strip() for line in fo if line.strip()])
 
     except (IOError):
-        g.message = c.r + 'Error while opening the file, check the validity of the path' + c.w
+        g.message = c.r + \
+            'Error while opening the file, check the validity of the path' + c.w
         g.content = g.content or generate_songlist_display(zeromsg=g.message)
         return
 
-    #Finally pass the input to yt_url
+    # Finally pass the input to yt_url
     yt_url(output)
 
 
@@ -3709,6 +3771,9 @@ def search_album(term, page=0, splash=True):
             c.y, artist, title, c.w, c.b, len(songs), len(mb_tracks), c.w)
         g.last_opened = ""
         g.last_search_query = ""
+        g.last_album['artist'] = album['artist']
+        g.last_album['title'] = album['title']
+        g.last_album['mb_tracks'] = mb_tracks
         g.current_page = page
         g.content = generate_songlist_display()
 
