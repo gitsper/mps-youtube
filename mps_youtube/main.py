@@ -2217,12 +2217,18 @@ def _download(song, filename, url=None, audio=False, allow_transcode=True):
 
     if audio and g.tagapp:
         if g.last_album and g.using_last_album:
-            insert_metadata(filename, song.title, mb_data = {
-                "title": song.title,
-                "track": [_["title"] for _ in g.last_album["mb_tracks"]].index(song.title)+1,
-                "album": g.last_album["title"],
-                "artist": g.last_album["artist"],
-            })
+            insert_metadata(
+                filename,
+                song.title,
+                mb_data={
+                    "title": song.title,
+                    "track": [
+                        _["title"] for _ in g.last_album["mb_tracks"]].index(
+                        song.title) +
+                    1,
+                    "album": g.last_album["title"],
+                    "artist": g.last_album["artist"],
+                    })
         else:
             insert_metadata(filename, song.title)
 
@@ -2424,7 +2430,10 @@ def down_many(dltype, choice, subdir=None):
 
     g.using_last_album = False
     if g.last_album:
-        show_message("Use last MusicBrainz search to organize files? [yes]", c.g, update=True)
+        show_message(
+            "Use last MusicBrainz search to organize files? [yes]",
+            c.g,
+            update=True)
         g.using_last_album = input("> ")
         if g.using_last_album == "" or g.using_last_album == "yes":
             g.using_last_album = True
@@ -2433,7 +2442,10 @@ def down_many(dltype, choice, subdir=None):
     if g.using_last_album:
         subdir = g.last_album['title']
         if len(g.last_album['mb_tracks']) != len(downsongs):
-            show_message("Error using last MusicBrainz search: track mismatch", c.g, update=True)
+            show_message(
+                "Error using last MusicBrainz search: track mismatch",
+                c.g,
+                update=True)
             input("Download aborted [Enter]")
             g.model.songs = temp
             downsongs = []
@@ -2471,7 +2483,19 @@ def down_many(dltype, choice, subdir=None):
                 continue
 
             try:
-                filename = _download(song, filename, url=None, audio=av == "audio")
+                filename = _download(
+                    song,
+                    filename,
+                    url=None,
+                    audio=av == "audio")
+                if g.using_last_album:
+                    vlc_playlist = open(
+                        os.path.join(
+                            os.path.dirname(filename),
+                            "vlc_play.m3u"),
+                        "a")
+                    vlc_playlist.write("%s\n" % os.path.basename(filename))
+                    vlc_playlist.close()
 
             except HTTPError:
                 handle_error("HTTP Error for %s" % song.title)
