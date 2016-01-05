@@ -11,15 +11,16 @@ class Playlist(object):
         self.creation = time.time()
         self.songs = songs or []
 
-    @property
-    def is_empty(self):
-        """ Return True / False if songs are populated or not. """
-        return not self.songs
-
-    @property
-    def size(self):
+    def __len__(self):
         """ Return number of tracks. """
         return len(self.songs)
+
+    def __getitem__(self, sliced):
+        return self.songs[sliced]
+
+    def __iter__(self):
+        for i in self.songs:
+            yield i
 
     @property
     def duration(self):

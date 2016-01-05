@@ -20,9 +20,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 
-
 __version__ = "0.2.6-dev"
-__notes__ = "development version"
+__notes__ = "merged with develop 5 January 2016"
 __author__ = "np1"
 __license__ = "GPLv3"
 __url__ = "http://github.com/np1/mps-youtube"
@@ -57,11 +56,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 import pafy
+from pafy import call_gdata, GdataError
 
 from . import g, c, commands, cache, streams, screen
 from .playlist import Playlist, Video
 from .paths import get_config_dir
-from .config import Config, known_player_set, import_config
+from .config import Config, known_player_set
 from .util import has_exefile, get_mpv_version, dbg, list_update, get_near_name
 from .util import get_mplayer_version, get_pafy
 from .util import xenc, xprint, mswinfn, set_window_title, F
@@ -100,6 +100,31 @@ locale.setlocale(locale.LC_ALL, "")  # for date formatting
 ISO8601_TIMEDUR_EX = re.compile(r'PT((\d{1,3})H)?((\d{1,3})M)?((\d{1,2})S)?')
 
 
+class IterSlicer():
+    """ Class that takes an iterable and allows slicing,
+        loading from the iterable as needed."""
+
+    def __init__(self, iterable):
+        self.ilist = []
+        self.iterable = iter(iterable)
+
+    def __getitem__(self, sliced):
+        if isinstance(sliced, slice):
+            stop = sliced.stop
+        else:
+            stop = sliced
+        # To get the last item in an iterable, must iterate over all items
+        if (stop is None) or (stop < 0):
+            stop = None
+        while (stop is None) or (stop > len(self.ilist) - 1):
+            try:
+                self.ilist.append(next(self.iterable))
+            except StopIteration:
+                break
+
+        return self.ilist[sliced]
+
+
 def get_content_length(url, preloading=False):
     """ Return content length of a url. """
     prefix = "preload: " if preloading else ""
@@ -130,20 +155,19 @@ def get_size(ytid, url, preloading=False):
 
 def get_version_info():
     """ Return version and platform info. """
-    out = "\nmpsyt version  : %s " % __version__
-    out += "\n   notes       : %s" % __notes__
-    out += "\npafy version   : %s" % pafy.__version__
-    out += "\nPython version : %s" % sys.version
-    out += "\nProcessor      : %s" % platform.processor()
-    out += "\nMachine type   : %s" % platform.machine()
+    out = "mpsyt version  : " + __version__
+    out += "\n   notes       : " + __notes__
+    out += "\npafy version   : " + pafy.__version__
+    out += "\nPython version : " + sys.version
+    out += "\nProcessor      : " + platform.processor()
+    out += "\nMachine type   : " + platform.machine()
     out += "\nArchitecture   : %s, %s" % platform.architecture()
-    out += "\nPlatform       : %s" % platform.platform()
-    out += "\nsys.stdout.enc : %s" % sys.stdout.encoding
-    out += "\ndefault enc    : %s" % sys.getdefaultencoding()
-    out += "\nConfig dir     : %s" % get_config_dir()
-    envs = "TERM SHELL LANG LANGUAGE".split()
+    out += "\nPlatform       : " + platform.platform()
+    out += "\nsys.stdout.enc : " + sys.stdout.encoding
+    out += "\ndefault enc    : " + sys.getdefaultencoding()
+    out += "\nConfig dir     : " + get_config_dir()
 
-    for env in envs:
+    for env in "TERM SHELL LANG LANGUAGE".split():
         value = os.environ.get(env)
         out += "\nenv:%-11s: %s" % (env, value) if value else ""
 
@@ -164,14 +188,10 @@ def process_cl_args():
     args = parser.parse_args()
 
     if args.version:
-        xprint(get_version_info())
-        xprint("")
-        sys.exit()
+        screen.msgexit(get_version_info())
 
     elif args.help:
-        for x in helptext():
-            xprint(x[2])
-        sys.exit()
+        screen.msgexit('\n'.join(i[2] for i in helptext()))
 
     if args.debug or os.environ.get("mpsytdebug") == "1":
         xprint(get_version_info())
@@ -217,10 +237,10 @@ def init():
         Config.save()
 
     else:
-        import_config()
+        Config.load()
 
     init_readline()
-    cache.init()
+    cache.load()
     init_transcode()
 
     # ensure encoder is not set beyond range of available presets
@@ -481,12 +501,10 @@ def open_from_file():
             g.userpl = pickle.load(plf)
 
         save_to_file()
-        xprint("Updated playlist file. Please restart mpsyt")
-        sys.exit()
+        screen.msgexit("Updated playlist file. Please restart mpsyt", 1)
 
     except EOFError:
-        xprint("Error opening playlists from %s" % g.PLFILE)
-        sys.exit()
+        screen.msgexit("Error opening playlists from %s" % g.PLFILE, 1)
 
     # remove any cached urls from playlist file, these are now
     # stored in a separate cache file
@@ -572,8 +590,7 @@ def playlists_display():
     """ Produce a list of all playlists. """
     if not g.userpl:
         g.message = F("no playlists")
-        return logo(c.y) + "\n\n" if g.model.is_empty else \
-            generate_songlist_display()
+        return generate_songlist_display() if g.model else (logo(c.y) + "\n\n")
 
     maxname = max(len(a) for a in g.userpl)
     out = "      {0}Local Playlists{1}\n".format(c.ul, c.w)
@@ -584,7 +601,7 @@ def playlists_display():
 
     for v, z in enumerate(sorted(g.userpl)):
         n, p = z, g.userpl[z]
-        l = fmt % (start, c.g, v + 1, n, c.w, c.y, str(p.size), c.y,
+        l = fmt % (start, c.g, v + 1, n, c.w, c.y, str(len(p)), c.y,
                    p.duration, c.w) + "\n"
         out += l
 
@@ -646,64 +663,13 @@ def get_track_id_from_json(item):
     return ''
 
 
-class GdataError(Exception):
-
-    """Gdata query failed."""
-    pass
-
-
-def call_gdata(api, qs):
-    """Make a request to the youtube gdata api."""
-    qs = copy.copy(qs)
-    qs['key'] = Config.API_KEY.get
-    url = "https://www.googleapis.com/youtube/v3/" + api + '?' + urlencode(qs)
-
-    if url in g.url_memo:
-        return json.loads(g.url_memo[url])
-
-    try:
-        data = urlopen(url).read().decode()
-
-    except HTTPError as e:
-        try:
-            errdata = e.file.read().decode()
-            error = json.loads(errdata)['error']['message']
-            errmsg = 'Youtube Error %d: %s' % (e.getcode(), error)
-        except:
-            errmsg = str(e)
-        raise GdataError(errmsg)
-
-    # Add to url memo, ensure url memo doesn't get too big.
-    dbg('Cache data for query url {}:'.format(url))
-    g.url_memo[url] = data
-
-    while len(g.url_memo) > 300:
-        g.url_memo.popitem(last=False)
-
-    return json.loads(data)
-
-
-def get_page_info_from_json(jsons, result_count=None):
-    """ Extract & save some information about result count and paging. """
-    g.more_pages = jsons.get('nextPageToken')
-    if result_count:
-        if result_count < screen.getxy().max_results:
-            g.more_pages = False
-    pageinfo = jsons.get('pageInfo')
-    per_page = pageinfo.get('resultsPerPage')
-    g.result_count = pageinfo.get('totalResults')
-    if result_count:  # limit number of results, e.g. if api makes it up
-        if result_count < per_page:
-            g.result_count = min(g.result_count, result_count)
-
-
 def get_tracks_from_json(jsons):
     """ Get search results from API response """
 
     items = jsons.get("items")
     if not items:
         dbg("got unexpected data or no search results")
-        return False
+        return ()
 
     # fetch detailed information about items from videos API
     qs = {'part': 'contentDetails,statistics,snippet',
@@ -774,8 +740,6 @@ def get_tracks_from_json(jsons):
                 'result {}\n{}'.format(ytid, e))
 
         songs.append(cursong)
-
-    get_page_info_from_json(jsons, len(songs))
 
     # return video objects
     return songs
@@ -974,20 +938,18 @@ def get_user_columns():
 
 def page_msg(page=0):
     """ Format information about currently displayed page to a string. """
-    max_results = screen.getxy().max_results
-    page_count = max(int(math.ceil(min(g.result_count, 500)/max_results)), 1)
+    page_count = math.ceil(g.result_count/screen.getxy().max_results)
     if page_count > 1:
         pagemsg = "{}{}/{}{}"
         #start_index = max_results * g.current_page
         return pagemsg.format('<' if page > 0 else '[',
                               "%s%s%s" % (c.y, page+1, c.w),
                               page_count,
-                              '>' if (g.more_pages is not None or
-                                      (page < page_count)) else ']')
+                              '>' if page + 1 < page_count else ']')
     return None
 
 
-def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
+def generate_songlist_display(song=False, zeromsg=None):
     """ Generate list of choices from a song list."""
     # pylint: disable=R0914
     if g.browse_mode == "ytpl":
@@ -995,16 +957,14 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
 
     max_results = screen.getxy().max_results
 
-    songs = g.model.songs or []
-
-    if not songs:
+    if not g.model:
         g.message = zeromsg or "Enter /search-term to search or [h]elp"
         return logo(c.g) + "\n\n"
     g.rprompt = page_msg(g.current_page)
 
-    have_meta = all(x.ytid in g.meta for x in songs)
+    have_meta = all(x.ytid in g.meta for x in g.model)
     user_columns = get_user_columns() if have_meta else []
-    maxlength = max(x.length for x in songs)
+    maxlength = max(x.length for x in g.model)
     lengthsize = 8 if maxlength > 35999 else 7
     lengthsize = 5 if maxlength < 6000 else lengthsize
     reserved = 9 + lengthsize + len(user_columns)
@@ -1027,7 +987,7 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
     hrow = c.ul + fmt % titles + c.w
     out = "\n" + hrow + "\n"
 
-    for n, x in enumerate(songs[:max_results]):
+    for n, x in enumerate(g.model[:max_results]):
         col = (c.r if n % 2 == 0 else c.p) if not song else c.b
         details = {'title': x.title, "length": fmt_time(x.length)}
         details = copy.copy(g.meta[x.ytid]) if have_meta else details
@@ -1046,11 +1006,11 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
             data.append(details[field])
 
         line = fmtrow % tuple(data)
-        col = col if not song or song != songs[n] else c.p
+        col = col if not song or song != g.model[n] else c.p
         line = col + line + c.w
         out += line + "\n"
 
-    return out + "\n" * (5 - len(songs)) if not song else out
+    return out + "\n" * (5 - len(g.model)) if not song else out
 
 
 def generate_real_playerargs(song, override, failcount):
@@ -1061,22 +1021,21 @@ def generate_real_playerargs(song, override, failcount):
     """
     # pylint: disable=R0914
     # pylint: disable=R0912
-    video = Config.SHOW_VIDEO.get
-    video = True if override in ("fullscreen", "window", "forcevid") else video
-    video = False if override == "audio" else video
+    video = ((Config.SHOW_VIDEO.get and override != "audio") or
+             (override in ("fullscreen", "window", "forcevid")))
     m4a = "mplayer" not in Config.PLAYER.get
-    q, audio, cached = failcount, not video, g.streams[song.ytid]
-    stream = streams.select(cached, q=q, audio=audio, m4a_ok=m4a)
+    cached = g.streams[song.ytid]
+    stream = streams.select(cached, q=failcount, audio=(not video), m4a_ok=m4a)
 
     # handle no audio stream available, or m4a with mplayer
     # by switching to video stream and suppressing video output.
-    if not stream and not video or failcount and not video:
+    if (not stream or failcount) and not video:
         dbg(c.r + "no audio or mplayer m4a, using video stream" + c.w)
         override = "a-v"
         video = True
-        stream = streams.select(cached, q=q, audio=False, maxres=1600)
+        stream = streams.select(cached, q=failcount, audio=False, maxres=1600)
 
-    if not stream and video:
+    if not stream:
         raise IOError("No streams available")
 
     if "uiressl=yes" in stream['url'] and "mplayer" in Config.PLAYER.get:
@@ -1094,42 +1053,32 @@ def generate_real_playerargs(song, override, failcount):
 
     # pylint: disable=E1103
     # pylint thinks PLAYERARGS.get might be bool
-    argsstr = Config.PLAYERARGS.get.strip()
-    args = argsstr.split() if argsstr else []
+    args = Config.PLAYERARGS.get.strip().split()
 
     known_player = known_player_set()
     if known_player:
         pd = g.playerargs_defaults[known_player]
-        args.append(pd["title"])
-        args.append(song.title)
-        novid_arg = pd["novid"]
-        fs_arg = pd["fs"]
-        list_update(fs_arg, args, remove=not Config.FULLSCREEN.get)
+        args.extend((pd["title"], song.title))
 
-        geometry = ""
+        if pd['geo'] not in args:
+            geometry = Config.WINDOW_SIZE.get or ""
 
-        if Config.WINDOW_SIZE.get and "-geometry" not in argsstr:
-            geometry = Config.WINDOW_SIZE.get
+            if Config.WINDOW_POS.get:
+                wp = Config.WINDOW_POS.get
+                xx = "+1" if "left" in wp else "-1"
+                yy = "+1" if "top" in wp else "-1"
+                geometry += xx + yy
 
-        if Config.WINDOW_POS.get and "-geometry" not in argsstr:
-            wp = Config.WINDOW_POS.get
-            xx = "+1" if "top" in wp else "-1"
-            yy = "+1" if "left" in wp else "-1"
-            geometry += "%s%s" % (yy, xx)
-
-        if geometry:
-            list_update(pd['geo'], args)
-            list_update(geometry, args)
+            if geometry:
+                args.extend((pd['geo'], geometry))
 
         # handle no audio stream available
         if override == "a-v":
-            list_update(novid_arg, args)
+            list_update(pd["novid"], args)
 
-        elif override == "fullscreen":
-            list_update(fs_arg, args)
-
-        elif override == "window":
-            list_update(fs_arg, args, remove=True)
+        elif ((Config.FULLSCREEN.get and override != "window")
+                or override == "fullscreen"):
+            list_update(pd["fs"], args)
 
         # prevent ffmpeg issue (https://github.com/mpv-player/mpv/issues/579)
         if not video and stream['ext'] == "m4a":
@@ -1141,7 +1090,7 @@ def generate_real_playerargs(song, override, failcount):
             list_update("-noquiet", args)
             list_update("-prefer-ipv4", args)
 
-        elif "mpv" in Config.PLAYER.get:
+        elif "mpv" in Config.PLAYER.get and not g.debug_mode:
             msglevel = pd["msglevel"]["<0.4"]
 
             #  undetected (negative) version number assumed up-to-date
@@ -1521,31 +1470,30 @@ def make_status_line(elapsed_s, prefix, songlength=0, volume=None):
     return prefix + status_line + vol_suffix
 
 
-def _search(progtext, qs=None, splash=True, pre_load=True):
+def _search(progtext, qs=None, msg=None, failmsg=None):
     """ Perform memoized url fetch, display progtext. """
-    g.message = "Searching for '%s%s%s'" % (c.y, progtext, c.w)
 
-    # show splash screen during fetch
-    if splash:
-        g.content = logo(c.b) + "\n\n"
-        screen.update()
+    loadmsg = "Searching for '%s%s%s'" % (c.y, progtext, c.w)
 
-    # perform fetch
     wdata = call_gdata('search', qs)
-    songs = get_tracks_from_json(wdata)
 
-    if songs and pre_load:
-        # preload first result url
-        kwa = {"song": songs[0], "delay": 0}
-        t = threading.Thread(target=preload, kwargs=kwa)
-        t.start()
+    def iter_songs():
+        wdata2 = wdata
+        while True:
+            for song in get_tracks_from_json(wdata2):
+                yield song
 
-    if songs:
-        g.model.songs = songs
-        return True
+            if not wdata2.get('nextPageToken'):
+                break
+            qs['pageToken'] = wdata2['nextPageToken']
+            wdata2 = call_gdata('search', qs)
 
-    return False
+    slicer = IterSlicer(iter_songs())
+    # The youtube search api returns a maximum of 500 results
+    length = min(wdata['pageInfo']['totalResults'], 500)
 
+    paginatesongs(slicer, length=length, msg=msg, failmsg=failmsg,
+            loadmsg=loadmsg)
 
 def token(page):
     """ Returns a page token for a given start index. """
@@ -1560,19 +1508,13 @@ def token(page):
     return b64.strip('=')
 
 
-def generate_search_qs(
-        term,
-        page=0,
-        result_count=screen.getxy().max_results,
-        match='term'):
+def generate_search_qs(term, match='term'):
     """ Return query string. """
-    if not result_count:
-        result_count = screen.getxy().max_results
 
     aliases = dict(views='viewCount')
     qs = {
         'q': term,
-        'maxResults': result_count,
+        'maxResults': 50,
         'safeSearch': "none",
         'order': aliases.get(Config.ORDER.get, Config.ORDER.get),
         'part': 'id,snippet',
@@ -1583,8 +1525,6 @@ def generate_search_qs(
     if match == 'related':
         qs['relatedToVideoId'] = term
         del qs['q']
-
-    qs['pageToken'] = token(page)
 
     if Config.SEARCH_MUSIC.get:
         qs['videoCategoryId'] = 10
@@ -1651,7 +1591,7 @@ def channelfromname(user):
 
 
 @commands.command(r'user\s+(.+)')
-def usersearch(q_user, page=0, splash=True, identify='forUsername'):
+def usersearch(q_user, identify='forUsername'):
     """ Fetch uploads by a YouTube user. """
 
     user, _, term = (x.strip() for x in q_user.partition("/"))
@@ -1665,18 +1605,16 @@ def usersearch(q_user, page=0, splash=True, identify='forUsername'):
         channel_id = user
 
     # at this point, we know the channel id associated to a user name
-    usersearch_id('/'.join([user, channel_id, term]), page, splash)
+    usersearch_id(user, channel_id, term)
 
 
-def usersearch_id(q_user, page=0, splash=True):
+def usersearch_id(user, channel_id, term):
     """ Performs a search within a user's (i.e. a channel's) uploads
     for an optional search term with the user (i.e. the channel)
     identified by its ID """
 
-    user, channel_id, term = (x.strip() for x in q_user.split("/"))
-    query = generate_search_qs(term, page=page)
-    # The value of the config item is 'views' not 'viewCount'
-    aliases = dict(views='viewCount')
+    query = generate_search_qs(term)
+    aliases = dict(views='viewCount')  # The value of the config item is 'views' not 'viewCount'
     if Config.USER_ORDER.get:
         query['order'] = aliases.get(Config.USER_ORDER.get,
                                      Config.USER_ORDER.get)
@@ -1697,26 +1635,12 @@ Use 'set search_music False' to show results not in the Music category.""" % ter
             failmsg = "User %s not found or has no videos." % termuser[1]
     msg = str(msg).format(c.w, c.y, c.y, term, user)
 
-    have_results = _search(progtext, query, splash)
-
-    if have_results:
-        g.browse_mode = "normal"
-        g.message = msg
-        g.last_opened = ""
-        g.last_search_query = {"user": q_user}
-        g.current_page = page
-        g.content = generate_songlist_display(frmat="search")
-
-    else:
-        g.message = failmsg
-        g.current_page = 0
-        g.last_search_query = {}
-        g.content = logo(c.r)
+    _search(progtext, query, msg, failmsg)
 
 
-def related_search(vitem, page=0, splash=True):
+def related_search(vitem):
     """ Fetch uploads by a YouTube user. """
-    query = generate_search_qs(vitem.ytid, page, match='related')
+    query = generate_search_qs(vitem.ytid, match='related')
 
     if query.get('videoCategoryId'):
         del query['videoCategoryId']
@@ -1724,25 +1648,14 @@ def related_search(vitem, page=0, splash=True):
     t = vitem.title
     ttitle = t[:48].strip() + ".." if len(t) > 49 else t
 
-    have_results = _search(ttitle, query, splash)
-
-    if have_results:
-        g.message = "Videos related to %s%s%s" % (c.y, ttitle, c.w)
-        g.last_opened = ""
-        g.last_search_query = {"related": vitem}
-        g.current_page = page
-        g.content = generate_songlist_display(frmat="search")
-
-    else:
-        g.message = "Related to %s%s%s not found" % (c.y, vitem.ytid, c.w)
-        g.content = logo(c.r)
-        g.current_page = 0
-        g.last_search_query = {}
+    msg = "Videos related to %s%s%s" % (c.y, ttitle, c.w)
+    failmsg = "Related to %s%s%s not found" % (c.y, vitem.ytid, c.w)
+    _search(ttitle, query, msg, failmsg)
 
 
 # Note: [^./] is to prevent overlap with playlist search command
 @commands.command(r'(?:search|\.|/)\s*([^./].{1,500})')
-def search(term, page=0, splash=True):
+def search(term):
     """ Perform search. """
     if not term or len(term) < 2:
         g.message = c.r + "Not enough input" + c.w
@@ -1750,29 +1663,16 @@ def search(term, page=0, splash=True):
         return
 
     logging.info("search for %s", term)
-    query = generate_search_qs(term, page)
-    have_results = _search(term, query, splash)
-
-    if have_results:
-        g.message = "Search results for %s%s%s" % (c.y, term, c.w)
-        g.last_opened = ""
-        g.last_search_query = {"term": term}
-        g.browse_mode = "normal"
-        g.current_page = page
-        g.content = generate_songlist_display(frmat="search")
-
-    else:
-        g.message = "Found nothing for %s%s%s" % (c.y, term, c.w)
-        g.content = logo(c.r)
-        g.current_page = 0
-        g.last_search_query = {}
+    query = generate_search_qs(term)
+    msg = "Search results for %s%s%s" % (c.y, term, c.w)
+    failmsg = "Found nothing for %s%s%s" % (c.y, term, c.w)
+    _search(term, query, msg, failmsg)
 
 
 @commands.command(r'u(?:ser)?pl\s(.*)')
-def user_pls(user, page=0, splash=True):
+def user_pls(user):
     """ Retrieve user playlists. """
-    user = {"is_user": True, "term": user}
-    return pl_search(user, page=page, splash=splash)
+    return pl_search(user, is_user=True)
 
 
 @commands.command(r'(?:\.\.|\/\/|pls(?:earch)?\s)\s*(.*)')
@@ -1786,10 +1686,6 @@ def pl_search(term, page=0, splash=True, is_user=False):
         g.message = c.r + "Not enough input" + c.w
         g.content = generate_songlist_display()
         return
-
-    if isinstance(term, dict):
-        is_user = term["is_user"]
-        term = term["term"]
 
     if splash:
         g.content = logo(c.g)
@@ -1806,9 +1702,8 @@ def pl_search(term, page=0, splash=True, is_user=False):
     else:
         # playlist search is done with the above url and param type=playlist
         logging.info("playlist search for %s", prog)
-        # Limit for playlists command
-        max_results = min(screen.getxy().max_results, 50)
-        qs = generate_search_qs(term, page, result_count=max_results)
+        qs = generate_search_qs(term)
+        qs['pageToken'] = token(page)
         qs['type'] = 'playlist'
         if 'videoCategoryId' in qs:
             del qs['videoCategoryId']  # Incompatable with type=playlist
@@ -1816,8 +1711,8 @@ def pl_search(term, page=0, splash=True, is_user=False):
         pldata = call_gdata('search', qs)
         id_list = [i.get('id', {}).get('playlistId')
                    for i in pldata.get('items', ())]
-        # page info
-        get_page_info_from_json(pldata, len(id_list))
+
+        result_count = min(pldata['pageInfo']['totalResults'], 500)
 
     qs = {'part': 'contentDetails,snippet',
           'maxResults': 50}
@@ -1830,12 +1725,16 @@ def pl_search(term, page=0, splash=True, is_user=False):
         qs['id'] = ','.join(id_list)
 
     pldata = call_gdata('playlists', qs)
-    playlists = get_pl_from_json(pldata)
+    playlists = get_pl_from_json(pldata)[:screen.getxy().max_results]
+
+    if is_user:
+        result_count = pldata['pageInfo']['totalResults']
 
     if playlists:
-        g.last_search_query = {"playlists": {"term": term, "is_user": is_user}}
+        g.last_search_query = (pl_search, {"term": term, "is_user": is_user})
         g.browse_mode = "ytpl"
         g.current_page = page
+        g.result_count = result_count
         g.ytpls = playlists
         g.message = "Playlist results for %s" % c.y + prog + c.w
         g.content = generate_playlist_display()
@@ -2018,7 +1917,7 @@ def fetch_comments(item):
 def comments(number):
     """ Receive use request to view comments. """
     if g.browse_mode == "normal":
-        item = g.model.songs[int(number) - 1]
+        item = g.model[int(number) - 1]
         fetch_comments(item)
 
     else:
@@ -2034,16 +1933,13 @@ def _make_fname(song, ext=None, av=None, subdir=None):
     if not os.path.exists(ddir):
         os.makedirs(ddir)
 
-    if ext:
-        extension = ext
-
-    else:
+    if not ext:
         stream = streams.select(streams.get(song),
                                 audio=av == "audio", m4a_ok=True)
-        extension = stream['ext']
+        ext = stream['ext']
 
-    # filename = song.title[:59] + "." + extension
-    filename = song.title + "." + extension
+    # filename = song.title[:59] + "." + ext
+    filename = song.title + "." + ext
     filename = os.path.join(ddir, mswinfn(filename.replace("/", "-")))
     filename = filename.replace('"', '')
     return filename
@@ -2254,7 +2150,7 @@ def _bi_range(start, end):
 
 def _parse_multi(choice, end=None):
     """ Handle ranges like 5-9, 9-5, 5- and -5. Return list of ints. """
-    end = end or str(g.model.size)
+    end = end or str(len(g.model))
     pattern = r'(?<![-\d])(\d+-\d+|-\d+|\d+-|\d+)(?![-\d])'
     items = re.findall(pattern, choice)
     alltracks = []
@@ -2310,8 +2206,8 @@ def save_last():
         saveas = ""
 
         # save using artist name in postion 1
-        if not g.model.is_empty:
-            saveas = g.model.songs[0].title[:18].strip()
+        if g.model:
+            saveas = g.model[0].title[:18].strip()
             saveas = re.sub(r"[^-\w]", "-", saveas, re.UNICODE)
 
         # loop to find next available name
@@ -2319,7 +2215,11 @@ def save_last():
 
         while g.userpl.get(saveas):
             post += 1
-            saveas = g.model.songs[0].title[:18].strip() + "-" + str(post)
+            saveas = g.model[0].title[:18].strip() + "-" + str(post)
+
+        # Playlists are not allowed to start with a digit
+        # TODO: Possibly change this, but ban purely numerical names
+        saveas = saveas.lstrip("0123456789")
 
         open_save_view("save", saveas)
 
@@ -2329,7 +2229,6 @@ def open_save_view(action, name):
     """ Open, save or view a playlist by name.  Get closest name match. """
     name = name.replace(" ", "-")
     if action == "open" or action == "view":
-
         saved = g.userpl.get(name)
 
         if not saved:
@@ -2337,36 +2236,22 @@ def open_save_view(action, name):
             saved = g.userpl.get(name)
 
         elif action == "open":
-            g.browse_mode = "normal"
-            g.model.songs = g.active.songs = list(saved.songs)
-            g.message = F("pl loaded") % name
+            g.active.songs = list(saved.songs)
             g.last_opened = name
-            g.last_search_query = {}
-            # g.content = generate_songlist_display()
-            g.content = generate_songlist_display(frmat=None)
-            kwa = {"song": g.model.songs[0], "delay": 0}
-            t = threading.Thread(target=preload, kwargs=kwa)
-            t.start()
+            msg = F("pl loaded") % name
+            paginatesongs(g.active, msg=msg)
 
         elif action == "view":
-            g.browse_mode = "normal"
-            g.last_search_query = {}
-            g.model.songs = list(saved.songs)
-            g.message = F("pl viewed") % name
             g.last_opened = ""
-            g.content = generate_songlist_display(frmat=None)
-            # g.content = generate_songlist_display()
-            kwa = {"song": g.model.songs[0], "delay": 0}
-            t = threading.Thread(target=preload, kwargs=kwa)
-            t.start()
+            msg = F("pl viewed") % name
+            paginatesongs(list(saved.songs), msg=msg)
 
         elif not saved and action in "view open".split():
             g.message = F("pl not found") % name
             g.content = playlists_display()
 
     elif action == "save":
-
-        if not g.model.songs:
+        if not g.model:
             g.message = "Nothing to save. " + F('advise search')
             g.content = generate_songlist_display()
 
@@ -2374,7 +2259,7 @@ def open_save_view(action, name):
             g.userpl[name] = Playlist(name, list(g.model.songs))
             g.message = F('pl saved') % name
             save_to_file()
-            g.content = generate_songlist_display(frmat=None)
+            g.content = generate_songlist_display()
 
 
 @commands.command(r'(open|view)\s*(\d{1,4})')
@@ -2393,12 +2278,12 @@ def songlist_rm_add(action, songrange):
     if action == "add":
         duplicate_songs = []
         for songnum in selection:
-            if g.model.songs[songnum - 1] in g.active.songs:
+            if g.model[songnum - 1] in g.active:
                 duplicate_songs.append(str(songnum))
-            g.active.songs.append(g.model.songs[songnum - 1])
+            g.active.songs.append(g.model[songnum - 1])
 
         d = g.active.duration
-        g.message = F('added to pl') % (len(selection), g.active.size, d)
+        g.message = F('added to pl') % (len(selection), len(g.active), d)
         if duplicate_songs:
             duplicate_songs = ', '.join(sorted(duplicate_songs))
             g.message += '\n'
@@ -2421,8 +2306,8 @@ def down_many(dltype, choice, subdir=None):
     """ Download multiple items. """
     choice = _parse_multi(choice)
     choice = list(set(choice))
-    downsongs = [g.model.songs[int(x) - 1] for x in choice]
-    temp = g.model.songs[::]
+    downsongs = [g.model[int(x) - 1] for x in choice]
+    temp = g.model[::]
     g.model.songs = downsongs[::]
     count = len(downsongs)
     av = "audio" if dltype.startswith("da") else "video"
@@ -2459,8 +2344,8 @@ def down_many(dltype, choice, subdir=None):
         g.model.songs.pop(0)
 
     try:
-        for n, song in enumerate(downsongs, 0):
-            g.result_count = len(g.model.songs)
+        for n, song in enumerate(downsongs):
+            g.result_count = len(g.model)
             disp = generate_songlist_display()
             title = "Download Queue (%s):%s\n\n" % (av, c.w)
             disp = re.sub(r"(Num\s*?Title.*?\n)", title, disp)
@@ -2512,7 +2397,7 @@ def down_many(dltype, choice, subdir=None):
     finally:
         g.model.songs = temp[::]
         g.message = msg
-        g.result_count = len(g.model.songs)
+        g.result_count = len(g.model)
         g.content = generate_songlist_display()
         g.using_last_album = False
 
@@ -2521,12 +2406,13 @@ def down_many(dltype, choice, subdir=None):
 def down_plist(dltype, parturl):
     """ Download YouTube playlist. """
 
-    plist(parturl, page=0, splash=True, dumps=True)
-    title = g.pafy_pls[parturl]['title']
+    plist(parturl)
+    dump(False)
+    title = g.pafy_pls[parturl][0].title
     subdir = mswinfn(title.replace("/", "-"))
     down_many(dltype, "1-", subdir=subdir)
     msg = g.message
-    plist(parturl, page=0, splash=True)
+    plist(parturl)
     g.message = msg
 
 
@@ -2556,7 +2442,7 @@ def play(pre, choice, post=""):
             g.content = generate_songlist_display()
             return
 
-    if not g.model.songs:
+    if not g.model:
         g.message = c.r + "There are no tracks to select" + c.w
         g.content = g.content or generate_songlist_display()
 
@@ -2581,18 +2467,15 @@ def play(pre, choice, post=""):
             override = "forcevid" if forcevid else override
 
         selection = _parse_multi(choice)
-        songlist = [g.model.songs[x - 1] for x in selection]
+        songlist = [g.model[x - 1] for x in selection]
 
         # cache next result of displayed items
         # when selecting a single item
         if len(songlist) == 1:
             chosen = selection[0] - 1
 
-            if len(g.model.songs) > chosen + 1:
-                nx = g.model.songs[chosen + 1]
-                kwa = {"song": nx, "override": override}
-                t = threading.Thread(target=preload, kwargs=kwa)
-                t.start()
+            if len(g.model) > chosen + 1:
+                preload(g.model[chosen + 1], override=override)
 
         play_range(songlist, shuffle, repeat, override)
 
@@ -2602,7 +2485,7 @@ def play(pre, choice, post=""):
 def play_all(pre, choice, post=""):
     """ Play all tracks in model (last displayed). shuffle/repeat if req'd."""
     options = pre + choice + post
-    play(options, "1-" + str(len(g.model.songs)))
+    play(options, "1-" + str(len(g.model)))
 
 
 @commands.command(r'ls')
@@ -2620,19 +2503,15 @@ def ls():
 @commands.command(r'vp')
 def vp():
     """ View current working playlist. """
-    if g.active.is_empty:
-        txt = F('advise search') if g.model.is_empty else F('advise add')
-        g.message = F('pl empty') + " " + txt
 
-    else:
-        g.browse_mode = "normal"
-        g.model.songs = g.active.songs
-        g.message = F('current pl')
+    msg = F('current pl')
+    txt = F('advise add') if g.model else F('advise search')
+    failmsg = F('pl empty') + " " + txt
 
-    g.content = generate_songlist_display(zeromsg=g.message)
+    paginatesongs(g.active, msg=msg, failmsg=failmsg)
 
 
-def preload(song, delay=2, override=False):
+def _preload(song, delay, override):
     """  Get streams (runs in separate thread). """
     if g.preload_disabled:
         return
@@ -2662,6 +2541,14 @@ def preload(song, delay=2, override=False):
         g.preloading.remove(song.ytid)
 
 
+def preload(song, delay=2, override=False):
+    """  Get streams. """
+    args = (song, delay, override)
+    t = threading.Thread(target=_preload, args=args)
+    t.daemon = True
+    t.start()
+
+
 def play_range(songlist, shuffle=False, repeat=False, override=False):
     """ Play a range of songs, exit cleanly on keyboard interrupt. """
     if shuffle:
@@ -2678,10 +2565,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
         hasnext = len(songlist) > n + 1
 
         if hasnext:
-            nex = songlist[n + 1]
-            kwa = {"song": nex, "override": override}
-            t = threading.Thread(target=preload, kwargs=kwa)
-            t.start()
+            preload(songlist[n + 1], override=override)
 
         set_window_title(song.title + " - mpsyt")
         try:
@@ -2731,7 +2615,7 @@ def quits(showlogo=True):
 
     screen.clear()
     msg = logo(c.r, version=__version__) if showlogo else ""
-    xprint(msg + F("exitmsg", 2))
+    msg += F("exitmsg", 2)
 
     if Config.CHECKUPDATE.get and showlogo:
 
@@ -2744,13 +2628,12 @@ def quits(showlogo=True):
                 v = v.group(1)
 
                 if v > __version__:
-                    vermsg = "\nA newer version is available (%s)\n" % v
-                    xprint(vermsg)
+                    msg += "\n\nA newer version is available (%s)\n" % v
 
         except (URLError, HTTPError, socket.timeout):
             dbg("check update timed out")
 
-    sys.exit()
+    screen.msgexit(msg)
 
 
 def get_dl_data(song, mediatype="any"):
@@ -2836,13 +2719,14 @@ def prompt_dl(song):
     model = {str(n + 1): (x['url'], x['ext']) for n, x in ed}
     url, ext = menu_prompt(model, "Download number: ", *dl_text)
     url2 = ext2 = None
+    mediatype = [i for i in dl_data if i['url'] == url][0]['mediatype']
 
-    if ext == "m4v" and g.muxapp and not Config.DOWNLOAD_COMMAND.get:
+    if mediatype == "video" and g.muxapp and not Config.DOWNLOAD_COMMAND.get:
         # offer mux if not using external downloader
         dl_data, p = get_dl_data(song, mediatype="audio")
         dl_text = gen_dl_text(dl_data, song, p)
         au_choices = "1" if len(dl_data) == 1 else "1-%s" % len(dl_data)
-        footer = [F('-audio'), F('select mux') % au_choices]
+        footer = [F('-audio') % ext, F('select mux') % au_choices]
         dl_text = tuple(dl_text[0:3]) + (footer,)
         aext = ("ogg", "m4a")
         model = [x['url'] for x in dl_data if x['ext'] in aext]
@@ -2908,7 +2792,7 @@ def download(dltype, num):
         return
 
     screen.writestatus("Fetching video info...")
-    song = (g.model.songs[int(num) - 1])
+    song = (g.model[int(num) - 1])
     best = dltype.startswith("dv") or dltype.startswith("da")
 
     if not best:
@@ -2976,15 +2860,16 @@ def download(dltype, num):
 
     if url_au:
         # multiplex
-        mux_cmd = "APP -i VIDEO -i AUDIO -c copy OUTPUT".split()
-        mux_cmd = "%s -i %s -i %s -c copy %s"
-        mux_cmd = [g.muxapp, "-i", args[1], "-i", args_au[1], "-c",
-                   "copy", args[1][:-3] + "mp4"]
+        name, ext = os.path.splitext(args[1])
+        tmpvideoname = name + '.' +str(random.randint(10000, 99999)) + ext
+        os.rename(args[1], tmpvideoname)
+        mux_cmd = [g.muxapp, "-i", tmpvideoname, "-i", args_au[1], "-c",
+                   "copy", name + ".mp4"]
 
         try:
             subprocess.call(mux_cmd)
             g.message = "Saved to :" + c.g + mux_cmd[7] + c.w
-            os.remove(args[1])
+            os.remove(tmpvideoname)
             os.remove(args_au[1])
 
         except KeyboardInterrupt:
@@ -3034,10 +2919,10 @@ def songlist_mv_sw(action, a, b):
 
     if action == "mv":
         g.model.songs.insert(j, g.model.songs.pop(i))
-        g.message = F('song move') % (g.model.songs[j].title, b)
+        g.message = F('song move') % (g.model[j].title, b)
 
     elif action == "sw":
-        g.model.songs[i], g.model.songs[j] = g.model.songs[j], g.model.songs[i]
+        g.model[i], g.model[j] = g.model[j], g.model[i]
         g.message = F('song sw') % (min(a, b), max(a, b))
 
     g.content = generate_songlist_display()
@@ -3053,9 +2938,9 @@ def playlist_add(nums, playlist):
         g.userpl[playlist] = Playlist(playlist)
 
     for songnum in nums:
-        g.userpl[playlist].songs.append(g.model.songs[songnum - 1])
+        g.userpl[playlist].songs.append(g.model[songnum - 1])
         dur = g.userpl[playlist].duration
-        f = (len(nums), playlist, g.userpl[playlist].size, dur)
+        f = (len(nums), playlist, len(g.userpl[playlist]), dur)
         g.message = F('added to saved pl') % f
 
     if nums:
@@ -3099,51 +2984,31 @@ def add_rm_all(action):
 
     """
     if action == "rm":
-        for n in reversed(range(0, len(g.model.songs))):
-            g.model.songs.pop(n)
-        g.message = c.b + "Cleared all songs" + c.w
-        g.content = generate_songlist_display()
+        g.model.songs.clear()
+        msg = c.b + "Cleared all songs" + c.w
+        g.content = generate_songlist_display(zeromsg=msg)
 
     elif action == "add":
-        size = g.model.size
+        size = len(g.model)
         songlist_rm_add("add", "-" + str(size))
 
 
 @commands.command(r'(n|p)\s*(\d{1,2})?')
 def nextprev(np, page=None):
     """ Get next / previous search results. """
-    glsq = g.last_search_query
-    content = g.model.songs
-    max_results = screen.getxy().max_results
+    page_count = math.ceil(g.result_count/screen.getxy().max_results)
 
-    if "user" in g.last_search_query:
-        function, query = usersearch_id, glsq['user']
-
-    elif "related" in g.last_search_query:
-        function, query = related_search, glsq['related']
-
-    elif "term" in g.last_search_query:
-        function, query = search, glsq['term']
-
-    elif "playlists" in g.last_search_query:
-        function, query = pl_search, glsq['playlists']
-        content = g.ytpls
-
-    elif "playlist" in g.last_search_query:
-        function, query = plist, glsq['playlist']
+    function, args = g.last_search_query
 
     good = False
 
-    if np == "n":
-        if len(content) == max_results and glsq:
-            if (g.current_page + 1) * max_results < 500:
-                if g.more_pages:
-                    g.current_page += 1
-                    good = True
+    if function:
+        if np == "n":
+            if g.current_page + 1 < page_count:
+                g.current_page += 1
+                good = True
 
-    elif np == "p":
-
-        if g.last_search_query:
+        elif np == "p":
             if page and int(page) in range(1, 20):
                 g.current_page = int(page)-1
                 good = True
@@ -3153,13 +3018,13 @@ def nextprev(np, page=None):
                 good = True
 
     if good:
-        function(query, page=g.current_page, splash=True)
+        function(page=g.current_page, splash=True, **args)
 
     else:
         norp = "next" if np == "n" else "previous"
         g.message = "No %s items to display" % norp
 
-    g.content = generate_songlist_display(frmat="search")
+    g.content = generate_songlist_display()
     return good
 
 
@@ -3173,10 +3038,10 @@ def user_more(num):
         return
 
     g.current_page = 0
-    item = g.model.songs[int(num) - 1]
+    item = g.model[int(num) - 1]
     channel_id = g.meta.get(item.ytid, {}).get('uploader')
     user = g.meta.get(item.ytid, {}).get('uploaderName')
-    usersearch_id('/'.join([user, channel_id, '']), 0, True)
+    usersearch_id(user, channel_id, '')
 
 
 @commands.command(r'r\s?(\d{1,4})')
@@ -3189,7 +3054,7 @@ def related(num):
         return
 
     g.current_page = 0
-    item = g.model.songs[int(num) - 1]
+    item = g.model[int(num) - 1]
     related_search(item)
 
 
@@ -3202,7 +3067,7 @@ def clip_copy(num):
         link = "https://youtube.com/playlist?list=%s" % p['link']
 
     elif g.browse_mode == "normal":
-        item = (g.model.songs[int(num) - 1])
+        item = (g.model[int(num) - 1])
         link = "https://youtube.com/watch?v=%s" % item.ytid
 
     else:
@@ -3238,7 +3103,7 @@ def mix(num):
     if g.browse_mode != "normal":
         g.message = F('mix only videos')
     else:
-        item = (g.model.songs[int(num) - 1])
+        item = (g.model[int(num) - 1])
         if item is None:
             g.message = F('invalid item')
             return
@@ -3257,19 +3122,17 @@ def info(num):
         p = g.ytpls[int(num) - 1]
 
         # fetch the playlist item as it has more metadata
-        yt_playlist = g.pafy_pls.get(p['link'])
+        ytpl = g.pafy_pls.get(p['link'])[0]
 
-        if not yt_playlist:
+        if not ytpl:
             g.content = logo(col=c.g)
             g.message = "Fetching playlist info.."
             screen.update()
             dbg("%sFetching playlist using pafy%s", c.y, c.w)
-            yt_playlist = pafy.get_playlist(p['link'])
-            g.pafy_pls[p['link']] = yt_playlist
+            ytpl = pafy.get_playlist2(p['link'])
+            g.pafy_pls[p['link']] = (ytpl, IterSlicer(ytpl))
 
-        ytpl_likes = yt_playlist.get('likes', 0)
-        ytpl_dislikes = yt_playlist.get('dislikes', 0)
-        ytpl_desc = yt_playlist.get('description', "")
+        ytpl_desc = ytpl.description
         g.content = generate_songlist_display()
 
         created = yt_datetime(p['created'])[0]
@@ -3279,8 +3142,6 @@ def info(num):
         out += "\n" + ytpl_desc
         out += ("\n\nAuthor     : " + p['author'])
         out += "\nSize       : " + str(p['size']) + " videos"
-        out += "\nLikes      : " + str(ytpl_likes)
-        out += "\nDislikes   : " + str(ytpl_dislikes)
         out += "\nCreated    : " + time.strftime("%x %X", created)
         out += "\nUpdated    : " + time.strftime("%x %X", updated)
         out += "\nID         : " + str(p['link'])
@@ -3291,7 +3152,7 @@ def info(num):
         g.content = logo(c.b)
         screen.update()
         screen.writestatus("Fetching video metadata..")
-        item = (g.model.songs[int(num) - 1])
+        item = (g.model[int(num) - 1])
         streams.get(item)
         p = get_pafy(item)
         pub = time.strptime(str(p.published), "%Y-%m-%d %H:%M:%S")
@@ -3318,7 +3179,7 @@ def play_url(url, override):
     g.browse_mode = "normal"
     yt_url(url, print_title=1)
 
-    if len(g.model.songs) == 1:
+    if len(g.model) == 1:
         play(override, "1", "_")
 
     if g.command_line:
@@ -3328,7 +3189,7 @@ def play_url(url, override):
 @commands.command(r'browserplay\s(\d{1,50})')
 def browser_play(number):
     """Open a previously searched result in the browser."""
-    if (len(g.model.songs) == 0):
+    if (len(g.model) == 0):
         g.message = c.r + "No previous search." + c.w
         g.content = logo(c.r)
         return
@@ -3336,9 +3197,9 @@ def browser_play(number):
     try:
         index = int(number) - 1
 
-        if (0 <= index < len(g.model.songs)):
+        if (0 <= index < len(g.model)):
             base_url = "https://www.youtube.com/watch?v="
-            video = g.model.songs[index]
+            video = g.model[index]
             url = base_url + video.ytid
             webbrowser.open(url)
             g.content = g.content or generate_songlist_display()
@@ -3360,7 +3221,7 @@ def dl_url(url):
     g.browse_mode = "normal"
     yt_url(url)
 
-    if len(g.model.songs) == 1:
+    if len(g.model) == 1:
         download("download", "1")
 
     if g.command_line:
@@ -3386,7 +3247,7 @@ def yt_url(url, print_title=0):
 
         g.browse_mode = "normal"
         v = Video(p.videoid, p.title, p.length)
-        g.model.songs += [v]
+        g.model.songs.append(v)
 
     if not g.command_line:
         g.content = generate_songlist_display()
@@ -3417,11 +3278,10 @@ def yt_url_file(file_name):
 @commands.command(r'(un)?dump')
 def dump(un):
     """ Show entire playlist. """
-    if g.last_search_query.get("playlist") and not un:
-        plist(g.last_search_query['playlist'], dumps=True)
+    func, args = g.last_search_query
 
-    elif g.last_search_query.get("playlist") and un:
-        plist(g.last_search_query['playlist'], page=0, dumps=False)
+    if func is paginatesongs:
+        paginatesongs(dumps=(not un), **args)
 
     else:
         un = "" if not un else un
@@ -3430,66 +3290,73 @@ def dump(un):
         g.content = generate_songlist_display()
 
 
-@commands.command(r'pl\s+%s' % commands.pl)
-def plist(parturl, page=0, splash=True, dumps=False):
-    """ Retrieve YouTube playlist. """
+def paginatesongs(func, page=0, splash=True, dumps=False,
+        length=None, msg=None, failmsg=None, loadmsg=None):
+    if isinstance(func, tuple):
+        func, msg, failmsg = func
+
+    if splash:
+        g.message = loadmsg or ''
+        g.content = logo(col=c.b)
+        screen.update()
+
     max_results = screen.getxy().max_results
 
-    if "playlist" in g.last_search_query and\
-            parturl == g.last_search_query['playlist']:
-
-        # go to pagenum
+    if dumps:
+        s = 0
+        e = None
+    else:
         s = page * max_results
         e = (page + 1) * max_results
 
-        if dumps:
-            s, e = 0, 99999
+    if callable(func):
+        songs, length = func(s, e)
+    else:
+        songs = func[s:e]
+        if length is None:
+            length = len(func)
 
-        g.model.songs = g.ytpl['items'][s:e]
-        g.more_pages = e < len(g.ytpl['items'])
-        g.content = generate_songlist_display()
-        g.message = "Showing YouTube playlist: %s" % c.y + g.ytpl['name'] + c.w
-        g.current_page = page
-        return
-
-    if splash:
-        g.content = logo(col=c.b)
-        g.message = "Retrieving YouTube playlist"
-        screen.update()
-
-    dbg("%sFetching playlist using pafy%s", c.y, c.w)
-    yt_playlist = pafy.get_playlist(parturl)
-    g.pafy_pls[parturl] = yt_playlist
-    ytpl_items = yt_playlist['items']
-    ytpl_title = yt_playlist['title']
-
-    songs = []
-
-    for item in ytpl_items:
-        # Create Video object, appends to songs
-        cur = Video(ytid=item['pafy'].videoid,
-                    title=item['pafy'].title,
-                    length=item['pafy'].length)
-        songs.append(cur)
-
-    if not ytpl_items:
-        dbg("got unexpected data or no search results")
-        return False
-
-    g.last_search_query = {"playlist": parturl}
+    args = {'func':func, 'length':length, 'msg':msg,
+            'failmsg':failmsg, 'loadmsg': loadmsg}
+    g.last_search_query = (paginatesongs, args)
     g.browse_mode = "normal"
-    g.ytpl = dict(name=ytpl_title, items=songs)
-    g.current_page = 0
-    g.result_count = len(g.ytpl['items'])
-    g.more_pages = max_results < len(g.ytpl['items'])
-    g.model.songs = songs[:max_results] if not dumps else songs[::]
-    # preload first result url
-    kwa = {"song": songs[0], "delay": 0}
-    t = threading.Thread(target=preload, kwargs=kwa)
-    t.start()
-
+    g.current_page = page
+    g.result_count = length
+    g.model.songs = songs
     g.content = generate_songlist_display()
-    g.message = "Showing YouTube playlist %s" % (c.y + ytpl_title + c.w)
+    g.last_opened = ""
+    g.message = msg or ''
+    if not songs:
+        g.message = failmsg or g.message
+
+    if songs:
+        # preload first result url
+        preload(songs[0], delay=0)
+
+
+@commands.command(r'pl\s+%s' % commands.pl)
+def plist(parturl):
+    """ Retrieve YouTube playlist. """
+
+    if parturl in g.pafy_pls:
+        ytpl, plitems = g.pafy_pls[parturl]
+    else:
+        dbg("%sFetching playlist using pafy%s", c.y, c.w)
+        ytpl = pafy.get_playlist2(parturl)
+        plitems = IterSlicer(ytpl)
+        g.pafy_pls[parturl] = (ytpl, plitems)
+
+    def pl_seg(s, e):
+        songs = [Video(i.videoid, i.title, i.length) for i in plitems[s:e]]
+
+        if not songs:
+            dbg("got unexpected data or no search results")
+
+        return songs, len(ytpl)
+
+    msg = "Showing YouTube playlist %s" % (c.y + ytpl.title + c.w)
+    loadmsg = "Retrieving YouTube playlist"
+    paginatesongs(pl_seg, msg=msg, loadmsg=loadmsg)
 
 
 @commands.command(r'shuffle')
@@ -3505,7 +3372,6 @@ def clearcache():
     """ Clear cached items - for debugging use. """
     g.pafs = {}
     g.streams = {}
-    g.url_memo = collections.OrderedDict()
     dbg("%scache cleared%s", c.p, c.w)
     g.message = "cache cleared"
 
@@ -3616,15 +3482,17 @@ def _match_tracks(artist, title, mb_tracks):
                                                dtime(length)))
         q = "%s %s" % (artist, ttitle)
         w = q = ttitle if artist == "Various Artists" else q
-        query = generate_search_qs(w, 0, result_count=50)
+        query = generate_search_qs(w, 0)
         dbg(query)
-        have_results = _search(q, query, splash=False, pre_load=False)
 
-        if not have_results:
+        # perform fetch
+        wdata = call_gdata('search', query)
+        results = get_tracks_from_json(wdata)
+
+        if not results:
             xprint(c.r + "Nothing matched :(\n" + c.w)
             continue
 
-        results = g.model.songs
         s, score = _best_song_match(results, artist + " " + ttitle, length)
         cc = c.g if score > 85 else c.y
         cc = c.r if score < 75 else cc
@@ -3699,7 +3567,7 @@ def _get_mb_album(albumname, **kwa):
 
 
 @commands.command(r'album\s*(.{0,500})')
-def search_album(term, page=0, splash=True):
+def search_album(term):
     """Search for albums. """
     # pylint: disable=R0914,R0912
     if not term:
@@ -3721,10 +3589,6 @@ def search_album(term, page=0, splash=True):
                                   c.g, album['artist'], c.w)
     out += ("[Enter] to continue, [q] to abort, or enter artist name for:\n"
             "    %s" % (c.y + term + c.w + "\n"))
-
-    if splash:
-        g.message, g.content = out, logo(c.b)
-        screen.update()
 
     prompt = "Artist? [%s] > " % album['artist']
     xprint(prompt, end="")
@@ -3784,37 +3648,34 @@ def search_album(term, page=0, splash=True):
     finally:
         Config.SEARCH_MUSIC.value, Config.ORDER.value = stash
 
+    g.last_opened = ""
+    g.last_search_query = ""
+    g.last_album['artist'] = album['artist']
+    g.last_album['title'] = album['title']
+    g.last_album['mb_tracks'] = mb_tracks
+
     if songs:
-        g.model.songs = songs
-        kwa = {"song": songs[0], "delay": 0}
-        t = threading.Thread(target=preload, kwargs=kwa)
-        t.start()
         xprint("\n%s / %s songs matched" % (len(songs), len(mb_tracks)))
         input("Press Enter to continue")
-        g.message = "Contents of album %s%s - %s%s %s(%d/%d)%s:" % (
-            c.y, artist, title, c.w, c.b, len(songs), len(mb_tracks), c.w)
-        g.last_opened = ""
-        g.last_search_query = ""
-        g.last_album['artist'] = album['artist']
-        g.last_album['title'] = album['title']
-        g.last_album['mb_tracks'] = mb_tracks
         g.current_page = page
         g.content = generate_songlist_display()
 
-    else:
-        g.message = "Found no album tracks for %s%s%s" % (c.y, title, c.w)
-        g.content = generate_songlist_display()
-        g.current_page = 0
-        g.last_search_query = ""
+    msg =  "Contents of album %s%s - %s%s %s(%d/%d)%s:" % (
+            c.y, artist, title, c.w, c.b, len(songs), len(mb_tracks), c.w)
+    failmsg = "Found no album tracks for %s%s%s" % (c.y, title, c.w)
+
+    def album_seg(s, e):
+        return songs[s:e], len(songs)
+
+    paginatesongs(album_seg, msg=msg, failmsg=failmsg)
 
 
 @commands.command(r'encoders?')
 def show_encs():
     """ Display available encoding presets. """
-    encs = g.encoders
     out = "%sEncoding profiles:%s\n\n" % (c.ul, c.w)
 
-    for x, e in enumerate(encs):
+    for x, e in enumerate(g.encoders):
         sel = " (%sselected%s)" % (c.y, c.w) if Config.ENCODER.get == x else ""
         out += "%2d. %s%s\n" % (x, e['name'], sel)
 

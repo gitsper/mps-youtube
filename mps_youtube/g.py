@@ -30,19 +30,16 @@ preloading = []
 no_clear_screen = False
 max_retries = 3
 max_cached_streams = 1500
-url_memo = collections.OrderedDict()
 username_query_cache = collections.OrderedDict()
 model = Playlist(name="model")
-last_search_query = {}
 last_album = {}
 using_last_album = False
+last_search_query = (None, None)
 current_page = 0
 result_count = 0
-more_pages = None
 rprompt = None
 active = Playlist(name="active")
 userpl = {}
-ytpl = {}
 pafs = collections.OrderedDict()
 streams = collections.OrderedDict()
 pafy_pls = {}  #
@@ -113,7 +110,7 @@ text = {
     'no pl match for rename_': (c.r, c.w),
     'invalid range': "*Invalid item / range entered!*",
     'invalid range_': (c.r, c.w),
-    '-audio': "*Warning* - the filetype you selected (m4v) has no audio!",
+    '-audio': "*Warning* - the filetype you selected (&&) has no audio!",
     '-audio_': (c.y, c.w),
     'no mix': 'No mix is available for the selected video',
     'mix only videos': 'Mixes are only available for videos',
