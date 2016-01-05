@@ -3657,8 +3657,6 @@ def search_album(term):
     if songs:
         xprint("\n%s / %s songs matched" % (len(songs), len(mb_tracks)))
         input("Press Enter to continue")
-        g.current_page = page
-        g.content = generate_songlist_display()
 
     msg =  "Contents of album %s%s - %s%s %s(%d/%d)%s:" % (
             c.y, artist, title, c.w, c.b, len(songs), len(mb_tracks), c.w)
